@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -14,109 +15,137 @@ namespace CuckooHash {
         private const ulong half = m / 2L;
         private const ulong c = 8;
 
-        private ulong g_a1;
-        private ulong g_a2;
+        private ulong _n;
+        private ulong _a1;
+        private ulong _a2;
 
-        private Random random = new Random();
+        private readonly Random _random = new Random();
 
-        private ulong insert_swap_count;
-        private ulong insert_count;
+        private ulong _insertSwapCount;
+        private ulong _insertCount;
 
         void ResetHashSeeds() {
-            g_a1 = random.NextUInt64(U);
-            g_a2 = random.NextUInt64(U);
+            _a1 = _random.NextUInt64(U);
+            _a2 = _random.NextUInt64(U);
         }
 
-        bool CuckooInsertNorehash(ulong[] table, ulong value) {
-            // TODO: FUUUUUUUUUUUUUUJ
-            int max_swaps = 10;
+        bool CuckooInsertNorehash(ulong[] table, ulong value, bool countInsert) {
+            int max_swaps = 6 * (int) Math.Max(1,
+                                Math.Ceiling(Math.Log(Math.Max(_n, 1)) / Math.Log(2)));
 
-
-            ulong current_a = g_a1;
+            ulong current_a = _a1;
 
             for (int i = 0; i < max_swaps; i++) {
                 ulong hash = MultiplicativeHash(current_a, value);
 
                 if (table[hash] == 0) {
-                    insert_count++;
+                    if (countInsert) {
+                        _insertCount++;
+                    }
 
                     table[hash] = value;
                     return true;
                 }
 
-                insert_swap_count++;
+                _insertSwapCount++;
 
                 ulong tmp = value;
                 value = table[hash];
                 table[hash] = tmp;
 
-                current_a = current_a == g_a1 ? g_a2 : g_a1;
+                ulong hashNew = MultiplicativeHash(current_a, value);
+                if (hashNew == hash) {
+                    current_a = current_a == _a1 ? _a2 : _a1;
+                } //prohodis
+
+                //current_a = current_a == _a1 ? _a2 : _a1;
             }
 
             return false;
         }
 
-        void CuckooInsert(ulong[] table, ulong value) {
+        public void CuckooInsert(ulong[] table, ulong value) {
             int max_rehash_count = 1000;
 
             for (int i = 0; i < max_rehash_count; i++) {
-                if (CuckooInsertNorehash(table, value)) {
+                if (CuckooInsertNorehash(table, value, true)) {
                     break;
                 } else {
-                    Console.WriteLine("Rehashing ... \n");
+                    Console.WriteLine("Rehashing ...");
                     table = RehashTable(table);
                 }
             }
         }
 
-        ulong[] RehashTable(ulong[] old_table) {
+
+        ulong[] RehashTable(ulong[] oldTable) {
             while (true) {
                 rehash_again:
                 ResetHashSeeds();
 
-                ulong[] new_table = new ulong[m];
+                ulong[] newTable = new ulong[m];
 
                 for (ulong i = 0; i < m; i++) {
-                    if (old_table[i] != 0) {
-                        if (!CuckooInsertNorehash(new_table, old_table[i])) {
+                    if (oldTable[i] != 0) {
+                        if (!CuckooInsertNorehash(newTable, oldTable[i], false)) {
                             goto rehash_again;
                         }
                     }
                 }
 
-                return new_table;
+                return newTable;
             }
         }
+
+        public void LinearInsert(ulong[] table, ulong value) {
+            ulong hash = MultiplicativeHash(_a1, value);
+
+            _insertCount++;
+            while (table[hash] != 0) {
+                hash = (hash + 1) % m;
+                _insertSwapCount++;
+            }
+
+            table[hash] = value;
+        }
+
 
         public ulong MultiplicativeHash(ulong a, ulong value) {
             return ((a * value) % U) / (U / m);
         }
 
-        public void Cuckoo() {
-            for (float fill = 0.01f; fill < 0.95f; fill += 0.01f) {
-                ulong maxMembers = (ulong) Math.Floor(m * fill);
+        public void GenericRun(Action<ulong[], ulong> inserter, string filename) {
+            using (var writer = new StreamWriter(filename)) {
+                for (float fill = 0.01f; fill < 0.95f; fill += 0.01f) {
+                    ulong maxMembers = (ulong) Math.Floor(m * fill);
 
-                ResetHashSeeds();
+                    ResetHashSeeds();
 
-                ulong[] table = new ulong[m];
+                    ulong[] table = new ulong[m];
 
-                ResetInsertCounts();
+                    ResetInsertCounts();
 
-                for (ulong i = 0; i < maxMembers; i++) {
-                    CuckooInsert(table, Math.Max(1, random.NextUInt64(U)));
+                    _n = 0;
+
+                    for (ulong i = 0; i < maxMembers; i++) {
+                        inserter(table, Math.Max(1, _random.NextUInt64(U)));
+                        _n++;
+                    }
+
+                    float swapsPerIns = ((float) _insertSwapCount / (float) Math.Max(1uL, _insertCount));
+                    Console.WriteLine(
+                        $"Fill({maxMembers}): {fill:.00}%" +
+                        $"\tinserts: {_insertCount:00000000}" +
+                        $"\tswaps/ins: {swapsPerIns:0.000}");
+
+                    writer.WriteLine($"{fill};{swapsPerIns}");
                 }
-
-                float swapsPerIns = ((float) insert_swap_count / Math.Max(1uL, insert_count));
-                Console.WriteLine(
-                    $"Fill({maxMembers}): {fill:.00}%" +
-                    $"\tinserts: {insert_count}" +
-                    $"\tswaps/ins: {swapsPerIns:.2}\n");
             }
         }
 
         private void ResetInsertCounts() {
-            insert_swap_count = 0;
-            insert_count = 0;
+            _insertSwapCount = 0;
+            _insertCount = 0;
         }
     }
 
@@ -131,7 +160,9 @@ namespace CuckooHash {
 
     class Program {
         static void Main(string[] args) {
-            new HashTest().Cuckoo();
+            var test = new HashTest();
+            test.GenericRun(test.CuckooInsert, "cuckoo-multiply.txt");
+            test.GenericRun(test.LinearInsert, "linear-multiply.txt");
         }
     }
 }
