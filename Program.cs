@@ -1,42 +1,90 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace CuckooHash {
+    // **********************************
+    // RNG for UInt64 (ulong), taken from https://stackoverflow.com/a/13095144/72583 
+    public static class RandomExtensionMethods {
+        public static ulong NextUlong(this Random random, ulong min, ulong max) {
+            if (max <= min)
+                throw new ArgumentOutOfRangeException("max", "max must be > min!");
+
+            ulong uRange = (ulong) (max - min);
+
+            ulong ulongRand;
+            do {
+                byte[] buf = new byte[8];
+                random.NextBytes(buf);
+                ulongRand = (ulong) BitConverter.ToInt64(buf, 0);
+            } while (ulongRand > ulong.MaxValue - ((ulong.MaxValue % uRange) + 1) % uRange);
+
+            return (ulong) (ulongRand % uRange) + min;
+        }
+
+        public static ulong NextUlong(this Random random, ulong max) {
+            return random.NextUlong(0, max);
+        }
+
+        public static ulong NextUlong(this Random random) {
+            return random.NextUlong(ulong.MinValue, ulong.MaxValue);
+        }
+    }
+    // *************************************
+
     class HashTest {
         private const ulong U = ulong.MaxValue;
         private const int u = 64;
-        private const int k = 20;
-        private const ulong m = 1 << k;
-        private const ulong half = m / 2L;
-        private const ulong c = 8;
+        public int k = 20;
+        private ulong m => 1uL << k;
+        private const int c = 8;
+
+        private int _numSubstrings => u / c;
 
         private ulong _n;
         private ulong _a1;
         private ulong _a2;
+        private ulong[,] _lookupTable1;
+        private ulong[,] _lookupTable2;
 
-        private readonly Random _random = new Random();
+        private readonly Random _random = new Random(1234);
 
         private ulong _insertSwapCount;
         private ulong _insertCount;
 
+        public HashFunctionType HashFunction;
+
         void ResetHashSeeds() {
-            _a1 = _random.NextUInt64(U);
-            _a2 = _random.NextUInt64(U);
+            _a1 = _random.NextUlong(U);
+            _a2 = _random.NextUlong(U);
+
+            _lookupTable1 = GenerateTable();
+            _lookupTable2 = GenerateTable();
         }
 
-        bool CuckooInsertNorehash(ulong[] table, ulong value, bool countInsert) {
-            int max_swaps = 6 * (int) Math.Max(1,
-                                Math.Ceiling(Math.Log(Math.Max(_n, 1)) / Math.Log(2)));
+        bool CuckooInsertNorehash(ulong[] table, ref ulong value, bool countInsert) {
+            int maxSwaps = 6 * (int) Math.Max(1,
+                               Math.Ceiling(Math.Log(Math.Max(_n, 1)) / Math.Log(2)));
 
-            ulong current_a = _a1;
+            ulong currentA = _a1;
+            ulong[,] currentTable = _lookupTable1;
 
-            for (int i = 0; i < max_swaps; i++) {
-                ulong hash = MultiplicativeHash(current_a, value);
+            for (int i = 0; i < maxSwaps; i++) {
+                ulong hash;
+
+                if (HashFunction == HashFunctionType.Multiplicative) {
+                    hash = MultiplicativeHash(currentA, value);
+                } else if (HashFunction == HashFunctionType.Table) {
+                    hash = LookupTableHash(currentTable, value);
+                } else {
+                    throw new NotImplementedException();
+                }
 
                 if (table[hash] == 0) {
                     if (countInsert) {
@@ -53,12 +101,20 @@ namespace CuckooHash {
                 value = table[hash];
                 table[hash] = tmp;
 
-                ulong hashNew = MultiplicativeHash(current_a, value);
-                if (hashNew == hash) {
-                    current_a = current_a == _a1 ? _a2 : _a1;
-                } //prohodis
 
-                //current_a = current_a == _a1 ? _a2 : _a1;
+                ulong hashNew;
+                if (HashFunction == HashFunctionType.Multiplicative) {
+                    hashNew = MultiplicativeHash(currentA, value);
+                } else if (HashFunction == HashFunctionType.Table) {
+                    hashNew = LookupTableHash(currentTable, value);
+                } else {
+                    throw new NotImplementedException();
+                }
+
+                if (hashNew == hash) {
+                    currentA = currentA == _a1 ? _a2 : _a1;
+                    currentTable = currentTable == _lookupTable1 ? _lookupTable2 : _lookupTable1;
+                }
             }
 
             return false;
@@ -68,13 +124,15 @@ namespace CuckooHash {
             int max_rehash_count = 1000;
 
             for (int i = 0; i < max_rehash_count; i++) {
-                if (CuckooInsertNorehash(table, value, true)) {
-                    break;
+                if (CuckooInsertNorehash(table, ref value, true)) {
+                    return;
                 } else {
                     Console.WriteLine("Rehashing ...");
                     table = RehashTable(table);
                 }
             }
+
+            throw new InvalidOperationException();
         }
 
 
@@ -87,7 +145,7 @@ namespace CuckooHash {
 
                 for (ulong i = 0; i < m; i++) {
                     if (oldTable[i] != 0) {
-                        if (!CuckooInsertNorehash(newTable, oldTable[i], false)) {
+                        if (!CuckooInsertNorehash(newTable, ref oldTable[i], false)) {
                             goto rehash_again;
                         }
                     }
@@ -98,7 +156,16 @@ namespace CuckooHash {
         }
 
         public void LinearInsert(ulong[] table, ulong value) {
-            ulong hash = MultiplicativeHash(_a1, value);
+            ulong hash;
+            if (HashFunction == HashFunctionType.Multiplicative) {
+                hash = MultiplicativeHash(_a1, value);
+            } else if (HashFunction == HashFunctionType.Table) {
+                hash = LookupTableHash(_lookupTable1, value);
+            } else if (HashFunction == HashFunctionType.Modulo) {
+                hash = ModuloHash(value);
+            } else {
+                throw new NotImplementedException();
+            }
 
             _insertCount++;
             while (table[hash] != 0) {
@@ -114,55 +181,142 @@ namespace CuckooHash {
             return ((a * value) % U) / (U / m);
         }
 
-        public void GenericRun(Action<ulong[], ulong> inserter, string filename) {
-            using (var writer = new StreamWriter(filename)) {
-                for (float fill = 0.01f; fill < 0.95f; fill += 0.01f) {
+        public ulong LookupTableHash(ulong[,] table, ulong value) {
+            ulong cmask = (1 << c) - 1;
+
+            ulong result = 0;
+
+            for (int i = 0; i < _numSubstrings; i++) {
+                //ulong currMask = cmask << (i * c);
+
+                ulong tableIndex = (value >> (i * c)) & cmask;
+
+                result ^= table[tableIndex, i];
+            }
+
+            return result;
+        }
+
+        private ulong[,] GenerateTable() {
+            var result = new ulong[1 << _numSubstrings, c];
+
+            for (int i = 0; i < result.GetLength(0); i++) {
+                for (int j = 0; j < result.GetLength(1); j++) {
+                    result[i, j] = _random.NextUlong(m);
+
+                    Debug.Assert(result[i, j] < m);
+                }
+            }
+
+            return result;
+        }
+
+
+        public ulong ModuloHash(ulong value) {
+            return value % m;
+        }
+
+        public void GenericRun(Action<ulong[], ulong> inserter, float maxFill, string filename) {
+            using (var writerTime = new StreamWriter($"time-{filename}"))
+            using (var writerSwaps = new StreamWriter(filename)) {
+                for (float fill = 0.01f; fill < maxFill; fill += 0.01f) {
                     ulong maxMembers = (ulong) Math.Floor(m * fill);
 
                     ResetHashSeeds();
 
                     ulong[] table = new ulong[m];
 
-                    ResetInsertCounts();
+                    _insertSwapCount = 0;
+                    _insertCount = 0;
 
                     _n = 0;
 
+                    var stopwatch = new Stopwatch();
+                    stopwatch.Reset();
+                    stopwatch.Start();
+
                     for (ulong i = 0; i < maxMembers; i++) {
-                        inserter(table, Math.Max(1, _random.NextUInt64(U)));
+                        inserter(table, Math.Max(1, _random.NextUlong(U)));
                         _n++;
                     }
 
+                    stopwatch.Stop();
+
                     float swapsPerIns = ((float) _insertSwapCount / (float) Math.Max(1uL, _insertCount));
+                    float timePerIns = 1000 * stopwatch.ElapsedMilliseconds / (float) _n;
+
                     Console.WriteLine(
                         $"Fill({maxMembers}): {fill:.00}%" +
                         $"\tinserts: {_insertCount:00000000}" +
-                        $"\tswaps/ins: {swapsPerIns:0.000}");
+                        $"\tswaps/ins: {swapsPerIns:0.000}" +
+                        $"\ttime/ins: {timePerIns:0.00000}ns");
 
-                    writer.WriteLine($"{fill};{swapsPerIns}");
+                    writerSwaps.WriteLine($"{fill} {swapsPerIns}");
+                    writerTime.WriteLine($"{fill} {timePerIns}");
                 }
             }
         }
 
-        private void ResetInsertCounts() {
-            _insertSwapCount = 0;
-            _insertCount = 0;
+        public void SequenceTest(Action<ulong[], ulong> inserter, float maxFill, string filename) {
+            for (k = 7; k < 22; k++) {
+                ulong startBound = (ulong) Math.Floor(m * 0.89f);
+                ulong stopBound = (ulong) Math.Floor(m * 0.91f);
+
+                ResetHashSeeds();
+
+                ulong[] table = new ulong[m];
+
+                for (ulong i = 1; i < startBound; i++) {
+                    inserter(table, i);
+                }
+
+                _insertSwapCount = 0;
+                _insertCount = 0;
+
+                for (ulong i = startBound; i < stopBound; i++)
+                {
+                    inserter(table, i);
+                }
+
+
+                float swapsPerIns = ((float)_insertSwapCount / (float)Math.Max(1uL, _insertCount));
+                Console.WriteLine($"k: {k}\tswaps/ins: {swapsPerIns:0.000}");
+            }
         }
     }
 
-    static class RndExtensions {
-        public static UInt64 NextUInt64(this Random rnd, ulong max) {
-            int rawsize = System.Runtime.InteropServices.Marshal.SizeOf(max);
-            var buffer = new byte[rawsize];
-            rnd.NextBytes(buffer);
-            return BitConverter.ToUInt64(buffer, 0);
-        }
+
+    enum HashFunctionType {
+        Multiplicative,
+        Modulo,
+        Table
     }
 
     class Program {
         static void Main(string[] args) {
             var test = new HashTest();
-            test.GenericRun(test.CuckooInsert, "cuckoo-multiply.txt");
-            test.GenericRun(test.LinearInsert, "linear-multiply.txt");
+
+            test.HashFunction = HashFunctionType.Table;
+            test.SequenceTest(test.LinearInsert, 0.95f, "seq-linear-table.txt");
+
+            test.HashFunction = HashFunctionType.Multiplicative;
+            test.SequenceTest(test.LinearInsert, 0.95f, "seq-linear-multiplicative.txt");
+
+            test.k = 20;
+
+            test.HashFunction = HashFunctionType.Table;
+
+            test.GenericRun(test.CuckooInsert, 0.491f, "cuckoo-table.txt");
+            test.GenericRun(test.LinearInsert, 0.95f, "linear-table.txt");
+
+            test.HashFunction = HashFunctionType.Modulo;
+
+            test.GenericRun(test.LinearInsert, 0.95f, "linear-modulo.txt");
+
+            test.HashFunction = HashFunctionType.Multiplicative;
+
+            test.GenericRun(test.CuckooInsert, 0.491f, "cuckoo-multiply.txt");
+            test.GenericRun(test.LinearInsert, 0.95f, "linear-multiply.txt");
         }
     }
 }
