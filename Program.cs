@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -257,30 +258,58 @@ namespace CuckooHash {
             }
         }
 
-        public void SequenceTest(Action<ulong[], ulong> inserter, float maxFill, string filename) {
-            for (k = 7; k < 22; k++) {
-                ulong startBound = (ulong) Math.Floor(m * 0.89f);
-                ulong stopBound = (ulong) Math.Floor(m * 0.91f);
+        public void SequenceTest(Action<ulong[], ulong> inserter, string filename) {
+            using (var minWriter = new StreamWriter($"min-{filename}"))
+            using (var maxWriter = new StreamWriter($"max-{filename}"))
+            using (var meanWriter = new StreamWriter($"mean-{filename}"))
+            using (var medianWriter = new StreamWriter($"median-{filename}"))
+            using (var decilWriter = new StreamWriter($"decil-{filename}")) {
+                for (k = 7; k < 22; k++) {
+                    ulong startBound = (ulong) Math.Floor(m * 0.89f);
+                    ulong stopBound = (ulong) Math.Floor(m * 0.91f);
 
-                ResetHashSeeds();
+                    var runs = new List<float>();
+                    for (int run = 0; run < 100; run++) {
+                        ResetHashSeeds();
 
-                ulong[] table = new ulong[m];
+                        ulong[] table = new ulong[m];
 
-                for (ulong i = 1; i < startBound; i++) {
-                    inserter(table, i);
+                        for (ulong i = 1; i < startBound; i++) {
+                            inserter(table, i);
+                        }
+
+                        _insertSwapCount = 0;
+                        _insertCount = 0;
+
+
+                        for (ulong i = startBound; i < stopBound; i++) {
+                            inserter(table, i);
+                        }
+
+                        float swapsPerIns = ((float) _insertSwapCount / (float) Math.Max(1uL, _insertCount));
+                        runs.Add(swapsPerIns);
+                    }
+
+                    float min = runs.Min();
+                    float max = runs.Max();
+                    float mean = runs.Average();
+                    runs.Sort();
+                    float median = runs[runs.Count / 2];
+                    float decil = runs[(int) (runs.Count * 0.9f)];
+
+                    Console.WriteLine($"k: {k}" +
+                                      $"\tmin: {min:0.000}" +
+                                      $"\tmax: {max:0.000}" +
+                                      $"\tmean: {mean:0.000}" +
+                                      $"\tmedian: {median:0.000}" +
+                                      $"\tdecil: {decil:0.000}");
+
+                    minWriter.WriteLine($"{k} {min}");
+                    maxWriter.WriteLine($"{k} {max}");
+                    meanWriter.WriteLine($"{k} {mean}");
+                    medianWriter.WriteLine($"{k} {median}");
+                    decilWriter.WriteLine($"{k} {decil}");
                 }
-
-                _insertSwapCount = 0;
-                _insertCount = 0;
-
-                for (ulong i = startBound; i < stopBound; i++)
-                {
-                    inserter(table, i);
-                }
-
-
-                float swapsPerIns = ((float)_insertSwapCount / (float)Math.Max(1uL, _insertCount));
-                Console.WriteLine($"k: {k}\tswaps/ins: {swapsPerIns:0.000}");
             }
         }
     }
@@ -297,11 +326,14 @@ namespace CuckooHash {
             var test = new HashTest();
 
             test.HashFunction = HashFunctionType.Table;
-            test.SequenceTest(test.LinearInsert, 0.95f, "seq-linear-table.txt");
+            Console.WriteLine("\nSEQ TABLE");
+            test.SequenceTest(test.LinearInsert, "seq-linear-table.txt");
 
+            Console.WriteLine("\nSEQ MULTIPLICATIVE");
             test.HashFunction = HashFunctionType.Multiplicative;
-            test.SequenceTest(test.LinearInsert, 0.95f, "seq-linear-multiplicative.txt");
+            test.SequenceTest(test.LinearInsert, "seq-linear-multiplicative.txt");
 
+            Console.WriteLine("\nRANDOM, k = 20");
             test.k = 20;
 
             test.HashFunction = HashFunctionType.Table;
